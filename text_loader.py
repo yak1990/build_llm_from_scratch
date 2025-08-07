@@ -30,13 +30,20 @@ def create_dataloader(txt,batch_size,tokenizer,max_length,stride,shuffle=True,dr
     dataloader=DataLoader(dataset,batch_size=batch_size,shuffle=shuffle,drop_last=drop_last,num_workers=num_workers)
     return dataloader
 
-def main():
+def create_example_dataloader(batch_size,max_length,stride):
     raw_text="""
     "I like to fancy that Stroud himself would have given it to me, if he'd been able to say what he thought that day."
     And, in answer to a question I put half-mechanically--"Begin again?" he flashed out. "When the one thing that brings me anywhere near him is that I knew enough to leave off?"
     He stood up and laid his hand on my shoulder with a laugh. "Only the irony of it is that I _am_ still painting--since Grindle's doing it for me! The Strouds stand alone, and happen once--but there's no exterminating our kind of art."
     """
 
+    tokenizer=tiktoken.get_encoding("gpt2")
+    dataloader=create_dataloader(raw_text,batch_size,tokenizer,max_length,stride)
+
+    return dataloader
+ 
+
+def main():
     vocab_size=50297
     output_dim=256
 
@@ -48,8 +55,7 @@ def main():
     batch_size=8
     max_length=16
 
-    tokenizer=tiktoken.get_encoding("gpt2")
-    dataloader=create_dataloader(raw_text,batch_size,tokenizer,max_length,max_length//2)
+    dataloader=create_example_dataloader(batch_size,max_length,max_length//2)
 
     pos_input=torch.arange(max_length)
     for batch in dataloader:
@@ -59,10 +65,8 @@ def main():
         pos_emb=pos_emb_layer(pos_input)
 
         input_emb=text_emb+pos_emb
-        output_emb=token_emb_layer(y)
 
         print(input_emb.shape)
-        print(output_emb.shape)
 
 
 
