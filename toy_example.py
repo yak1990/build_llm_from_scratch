@@ -1,5 +1,5 @@
 import text_loader
-import toy_attention
+import toy_llm
 import torch
 
 def main():
@@ -15,7 +15,7 @@ def main():
     pos_emb_layer=torch.nn.Embedding(max_length,data_dim)
     pos_input=torch.arange(max_length)
 
-    model=toy_attention.Toy_MultiHeadAttention(data_dim,data_dim,8,max_length)
+    model=toy_llm.Toy_MultiHeadAttention(data_dim,data_dim,8,max_length)
 
     for batch in dataloader:
         x,y=batch
