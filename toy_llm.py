@@ -20,17 +20,50 @@ class Toy_MultiHeadAttention(nn.Module):
         
         self.register_buffer('mask',torch.triu(torch.ones(windows_size,windows_size).bool(),diagonal=1))
 
-    def forward(self,x):
+        self.key_cache=None
+        self.value_cache=None
+        self.cur_id=0
+
+        self.windows_size=windows_size
+
+    def forward(self,x,use_cache=False):
         B,L,D=x.shape
 
         qkv=self.qkv_layer(x)
         qkv=qkv.view(B,L,3,self.num_heads,self.head_dim).permute(2,0,3,1,4) # final shape: (3,B,num_heads,L,head_dim)
         q,k,v=qkv.unbind(0) # each shape: (B,num_heads,L,head_dim)
 
+        if use_cache:
+            if self.key_cache is None or self.key_cache.shape[0]!=B:
+                self.key_cache=torch.zeros(B,self.num_heads,self.windows_size,self.head_dim,device=x.device)
+                self.value_cache=torch.zeros(B,self.num_heads,self.windows_size,self.head_dim,device=x.device)
+                self.cur_id=0
+            
+            if self.cur_id+L>=self.windows_size:
+                move_step=self.cur_id+L-self.windows_size
+                torch.roll_(self.key_cache,dims=2,steps=-move_step)
+                torch.roll_(self.value_cache,dims=2,steps=-move_step)
+                self.cur_id=self.cur_id-move_step
+            
+            self.key_cache[:,:,self.cur_id:self.cur_id+L,:]=k
+            self.value_cache[:,:,self.cur_id:self.cur_id+L,:]=v
+            self.cur_id+=L
+            
+            col_id=torch.arange(self.cur_id,device=x.device)
+            row_id=torch.arange(self.cur_id-L,self.cur_id,device=x.device)
+            atten_mask=col_id[None,:]>row_id[:,None]
+
+
+            k=self.key_cache[:,:,:self.cur_id]
+            v=self.value_cache[:,:,:self.cur_id]
+        else:
+            atten_mask=self.mask[:L,:L]
+
+
         atten_score=q@k.transpose(2,3)
         atten_score=atten_score/self.head_norm
 
-        atten_score=atten_score.masked_fill_(self.mask[:L,:L],-torch.inf)
+        atten_score=atten_score.masked_fill_(atten_mask,-torch.inf)
         
         atten_score=torch.softmax(atten_score,dim=-1)
         atten_score=self.dropout_layer(atten_score)
@@ -86,10 +119,10 @@ class Toy_Transformer(nn.Module):
 
         self.shortcut_drop_out=nn.Dropout(drop_out)
     
-    def forward(self,x):
+    def forward(self,x,use_cache=False):
         short_cut=x
         x=self.norm1(x)
-        x=self.attn(x)
+        x=self.attn(x,use_cache)
         x=self.shortcut_drop_out(x)
         x=x+short_cut
 
@@ -108,17 +141,24 @@ class Toy_LLM(nn.Module):
         self.pos_embedding=nn.Embedding(max_length,d_dim)
         self.embedding_dropout=nn.Dropout(drop_out)
 
-        self.transformers=nn.Sequential(*[
+        self.transformers=nn.ModuleList([
             Toy_Transformer(d_dim,num_heads,windows_size,drop_out,qkv_bias)
             for _ in range(num_layers)
         ])
 
         self.fin_norm=Toy_LayerNorm(d_dim)
         self.fin_layer=nn.Linear(d_dim,vocab_size)
+
+        self.cur_id=0
+
     
-    def forward(self,x):
+    def forward(self,x,use_cache=False):
         B,L=x.shape
-        pos=torch.arange(L,device=x.device)
+        if use_cache:
+            pos=torch.arange(self.cur_id,self.cur_id+L,device=x.device)
+            self.cur_id+=L
+        else:
+            pos=torch.arange(L,device=x.device)
 
         text_emb=self.text_embedding(x)
         pos_emb=self.pos_embedding(pos)
@@ -126,7 +166,8 @@ class Toy_LLM(nn.Module):
         x=text_emb+pos_emb
         x=self.embedding_dropout(x)
 
-        x=self.transformers(x)
+        for transformer in self.transformers:
+            x=transformer(x,use_cache)  
 
         x=self.fin_norm(x)
         logits=self.fin_layer(x)
@@ -152,16 +193,50 @@ def test_llm():
     vocab_size=50297
     input_dim=16
     num_heads=4
-    max_length=32
+    max_length=1024
     layer_num=4
 
     model=Toy_LLM(vocab_size,input_dim,num_heads,max_length,max_length,layer_num,).cuda()
 
     x=torch.randint(0,vocab_size,(1,5)).cuda()
+    
     y=model(x)
     print(x.shape,y.shape)
     print(x)
     print(y)
+
+    text_len=1000
+    model.eval()
+    with torch.no_grad():
+        import copy
+        cache_x=copy.deepcopy(x)
+
+        from time import time
+        t=time()
+        for id in range(text_len):
+            logits=model(x)
+            logits=logits[:,-1]
+            # print(id,logits[-1,:5],logits[-1,-5:])
+            next_id=torch.argmax(logits,dim=-1,keepdim=True)
+            x=torch.cat([x,next_id],dim=-1)
+            # print(id,x)
+        print('no cache time:',time()-t)
+        
+        x=cache_x
+        t=time()
+        for id in range(text_len):
+            if id==0:
+                logits=model(x,use_cache=True)
+            else:
+                logits=model(next_id,use_cache=True)
+            logits=logits[:,-1]
+            # print(id,logits[-1,:5],logits[-1,-5:])
+            next_id=torch.argmax(logits,dim=-1,keepdim=True)
+            x=torch.cat([x,next_id],dim=-1)
+            # print(id,x)
+        print('with cache time:',time()-t)
+            
+
 
 
 
