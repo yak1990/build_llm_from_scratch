@@ -5,7 +5,7 @@ import math
 
 
 class Toy_MultiHeadAttention(nn.Module):
-    def __init__(self,input_dim,output_dim,num_heads,windows_size,drop_out=0.1,qkv_bias=False, *args, **kwargs) -> None:
+    def __init__(self,input_dim,output_dim,num_heads,windows_size,drop_out=0.1,qkv_bias=False,causal_atten=True, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         assert output_dim%num_heads==0
@@ -18,7 +18,10 @@ class Toy_MultiHeadAttention(nn.Module):
 
         self.out_proj=nn.Linear(output_dim,output_dim)
         
-        self.register_buffer('mask',torch.triu(torch.ones(windows_size,windows_size).bool(),diagonal=1))
+        if causal_atten:
+            self.register_buffer('mask',torch.triu(torch.ones(windows_size,windows_size).bool(),diagonal=1))
+        else:
+            self.register_buffer('mask',torch.zeros(windows_size,windows_size).bool())
 
         self.key_cache=None
         self.value_cache=None
