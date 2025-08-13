@@ -36,7 +36,7 @@ def random_generate(init_txt,tokenizer,model,max_length,top_k=None,temperature=1
             if top_k is not None:
                 top_value,top_id=torch.topk(logits,top_k)
                 probs=torch.nn.functional.softmax(top_value,dim=-1)
-                next_id=top_id[torch.multinomial(probs,num_samples=1)]
+                next_id=top_id[:,torch.multinomial(probs,num_samples=1)][:,0,:]
             else:
                 next_id=torch.argmax(logits,dim=-1,keepdim=True)
             x=torch.cat([x,next_id],dim=-1)
@@ -47,7 +47,7 @@ def random_generate(init_txt,tokenizer,model,max_length,top_k=None,temperature=1
     return x
 
 
-def main():
+def train():
     # 加载数据集，分为训练集、测试集
     def read_file_list(f_list,spilt_eof='<|endoftext|>'):
         raw_txt_list=[]
@@ -85,6 +85,7 @@ def main():
     drop_out=0.1
     # 初始化网络
     model=toy_llm.Toy_LLM(vocab_size,d_dim,num_heads,max_length,max_length,num_layers,drop_out)
+    model=torch.compile(model)
     model.cuda()
     # 设置优化器
     lr=1e-4
@@ -122,9 +123,59 @@ def main():
     # 保存模型参数，模型与优化器
 
 
+def load_gpt2():
+    import gpt2_downloader
+    settings,params=gpt2_downloader.get_gpt()
+
+    gpt2=toy_llm.Toy_LLM(
+            settings['n_vocab'],
+            settings['n_embd'],
+            settings['n_head'],
+            settings['n_ctx'],
+            settings['n_ctx'],
+            settings['n_layer'],
+            drop_out=0,
+            qkv_bias=True
+        )
+    def to_torch(tf_data):
+        return torch.nn.Parameter(torch.tensor(tf_data))
+    # embeding weight 
+    gpt2.text_embedding.weight=to_torch(params['wte'])
+    gpt2.pos_embedding.weight=to_torch(params['wpe'])
+
+    # transformer weight 
+    for id,i in enumerate(params['blocks']):
+        gpt2.transformers[id].attn.qkv_layer.weight=to_torch(i['attn']['c_attn']['w'].T)
+        gpt2.transformers[id].attn.qkv_layer.bias=to_torch(i['attn']['c_attn']['b'])
+
+        gpt2.transformers[id].attn.out_proj.weight=to_torch(i['attn']['c_proj']['w'].T)
+        gpt2.transformers[id].attn.out_proj.bias=to_torch(i['attn']['c_proj']['b'].T)
+
+        gpt2.transformers[id].norm1.mean=to_torch(i['ln_1']['b'])
+        gpt2.transformers[id].norm1.std=to_torch(i['ln_1']['g'])
+
+        gpt2.transformers[id].norm2.mean=to_torch(i['ln_2']['b'])
+        gpt2.transformers[id].norm2.std=to_torch(i['ln_2']['g'])
+
+        gpt2.transformers[id].ffn.net[0].weight=to_torch(i['mlp']['c_fc']['w'].T)
+        gpt2.transformers[id].ffn.net[0].bias=to_torch(i['mlp']['c_fc']['b'])
+
+        gpt2.transformers[id].ffn.net[-1].weight=to_torch(i['mlp']['c_proj']['w'].T)
+        gpt2.transformers[id].ffn.net[-1].bias=to_torch(i['mlp']['c_proj']['b'])
+    # post weight
+    gpt2.fin_norm.mean=to_torch(params['b'])
+    gpt2.fin_norm.std=to_torch(params['g'])
+    gpt2.fin_layer.weight=to_torch(params['wte'])
+
+    return gpt2.eval().cuda()
+
+def eval():
+    gpt2=load_gpt2()
+    tokenizer=tiktoken.get_encoding("gpt2") 
+    print(random_generate("Every effort moves you",tokenizer,gpt2,64))
 
 
-    pass
    
 if __name__=='__main__':
-    main()
+    # train()
+    eval()

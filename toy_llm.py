@@ -169,7 +169,7 @@ class Toy_LLM(nn.Module):
         ])
 
         self.fin_norm=Toy_LayerNorm(d_dim)
-        self.fin_layer=nn.Linear(d_dim,vocab_size)
+        self.fin_layer=nn.Linear(d_dim,vocab_size,bias=False)
 
         self.cur_id=0
         self.windows_size=windows_size
