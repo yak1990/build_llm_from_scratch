@@ -1,4 +1,3 @@
-from turtle import pos
 import torch
 from torch.utils.data import Dataset,DataLoader
 import tiktoken
@@ -25,7 +24,9 @@ class GPTDataset(Dataset):
         return self.input_ids[index],self.target_ids[index]
 
 
-def create_dataloader(txt,batch_size,tokenizer,max_length,stride,shuffle=True,drop_last=True,num_workers=0):
+def create_dataloader(txt,batch_size,max_length,stride,tokenizer=None,shuffle=True,drop_last=True,num_workers=0):
+    if tokenizer is None:
+        tokenizer=tiktoken.get_encoding("gpt2")
     dataset=GPTDataset(txt,tokenizer,max_length,stride)
     dataloader=DataLoader(dataset,batch_size=batch_size,shuffle=shuffle,drop_last=drop_last,num_workers=num_workers)
     return dataloader
@@ -37,8 +38,7 @@ def create_example_dataloader(batch_size,max_length,stride):
     He stood up and laid his hand on my shoulder with a laugh. "Only the irony of it is that I _am_ still painting--since Grindle's doing it for me! The Strouds stand alone, and happen once--but there's no exterminating our kind of art."
     """
 
-    tokenizer=tiktoken.get_encoding("gpt2")
-    dataloader=create_dataloader(raw_text,batch_size,tokenizer,max_length,stride)
+    dataloader=create_dataloader(raw_text,batch_size,max_length,stride)
 
     return dataloader
  

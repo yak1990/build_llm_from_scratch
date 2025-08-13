@@ -42,10 +42,13 @@ class Toy_MultiHeadAttention(nn.Module):
                 self.value_cache=torch.zeros(B,self.num_heads,self.windows_size,self.head_dim,device=x.device)
                 self.cur_id=0
             
-            if self.cur_id+L>=self.windows_size:
+            if self.cur_id+L>self.windows_size:
                 move_step=self.cur_id+L-self.windows_size
-                torch.roll_(self.key_cache,dims=2,steps=-move_step)
-                torch.roll_(self.value_cache,dims=2,steps=-move_step)
+                # torch.roll_(self.key_cache,dims=2,steps=-move_step)
+                # torch.roll_(self.value_cache,dims=2,steps=-move_step)
+
+                self.key_cache[:,:,:self.windows_size-move_step,...]=self.key_cache[:,:,move_step:,...]
+                self.value_cache[:,:,:self.windows_size-move_step,...]=self.value_cache[:,:,move_step:,...]
                 self.cur_id=self.cur_id-move_step
             
             self.key_cache[:,:,self.cur_id:self.cur_id+L,:]=k
@@ -61,6 +64,13 @@ class Toy_MultiHeadAttention(nn.Module):
             v=self.value_cache[:,:,:self.cur_id]
         else:
             atten_mask=self.mask[:L,:L]
+        
+        # print('k front',k[0,0,:3])
+        # print('k end',k[0,0,-3:])
+        # print('v front',v[0,0,:3])
+        # print('v end',v[0,0,-3:])
+        # print('k',k.shape)
+        # print('v',v.shape)
 
 
         atten_score=q@k.transpose(2,3)
@@ -77,6 +87,12 @@ class Toy_MultiHeadAttention(nn.Module):
         output=self.out_proj(output)
 
         return output
+
+
+    def reset_cache(self):
+        self.key_cache=None
+        self.value_cache=None
+        self.cur_id=0
 
 class Toy_LayerNorm(nn.Module):
     def __init__(self,d_dim, *args, **kwargs) -> None:
@@ -136,6 +152,9 @@ class Toy_Transformer(nn.Module):
         x=x+short_cut
         return x
 
+    def reset_cache(self):
+        self.attn.reset_cache()
+
 class Toy_LLM(nn.Module):
     def __init__(self,vocab_size,d_dim,num_heads,windows_size,max_length,num_layers,drop_out=0.1,qkv_bias=False, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -153,20 +172,31 @@ class Toy_LLM(nn.Module):
         self.fin_layer=nn.Linear(d_dim,vocab_size)
 
         self.cur_id=0
+        self.windows_size=windows_size
 
     
     def forward(self,x,use_cache=False):
         B,L=x.shape
+
         if use_cache:
             pos=torch.arange(self.cur_id,self.cur_id+L,device=x.device)
             self.cur_id+=L
         else:
             pos=torch.arange(L,device=x.device)
 
+        if L>self.windows_size:
+            x=x[:,-self.windows_size:]
+            pos=pos[-self.windows_size:]
+
+        # print('x',x)
+        # print('pos',pos)
+
+
         text_emb=self.text_embedding(x)
         pos_emb=self.pos_embedding(pos)
 
         x=text_emb+pos_emb
+        # print('x',x[0,-1,-10:])
         x=self.embedding_dropout(x)
 
         for transformer in self.transformers:
@@ -176,6 +206,10 @@ class Toy_LLM(nn.Module):
         logits=self.fin_layer(x)
         return logits
 
+    def reset_cache(self):
+        self.cur_id=0
+        for i in self.transformers:
+            i.reset_cache()
 
 def test_mha():
     input_dim=3
@@ -193,13 +227,14 @@ def test_llm():
 
     torch.manual_seed(10)
 
-    vocab_size=50297
+    vocab_size=98
     input_dim=16
     num_heads=4
-    max_length=1024
+    max_length=128
+    windows_size=32
     layer_num=4
 
-    model=Toy_LLM(vocab_size,input_dim,num_heads,max_length,max_length,layer_num,).cuda()
+    model=Toy_LLM(vocab_size,input_dim,num_heads,windows_size,max_length,layer_num,).cuda()
 
     x=torch.randint(0,vocab_size,(1,5)).cuda()
     
@@ -208,26 +243,31 @@ def test_llm():
     print(x)
     print(y)
 
-    text_len=1000
+    text_len=max_length-10
     model.eval()
     with torch.no_grad():
         import copy
         cache_x=copy.deepcopy(x)
 
+
+        no_cache={}
         from time import time
         t=time()
         for id in range(text_len):
+            print(id,x.shape)
             logits=model(x)
             logits=logits[:,-1]
             # print(id,logits[-1,:5],logits[-1,-5:])
             next_id=torch.argmax(logits,dim=-1,keepdim=True)
             x=torch.cat([x,next_id],dim=-1)
             # print(id,x)
+            no_cache[id]=next_id
         print('no cache time:',time()-t)
         
         x=cache_x
         t=time()
         for id in range(text_len):
+            print(id,x.shape)
             if id==0:
                 logits=model(x,use_cache=True)
             else:
@@ -237,6 +277,8 @@ def test_llm():
             next_id=torch.argmax(logits,dim=-1,keepdim=True)
             x=torch.cat([x,next_id],dim=-1)
             # print(id,x)
+            diff=abs(no_cache[id]-next_id)
+            print(id,'diff',max(diff),min(diff))
         print('with cache time:',time()-t)
             
 
