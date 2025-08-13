@@ -19,7 +19,7 @@ def eval_model(model,dataloader):
     model.train()
     return sum(loss_list)/len(loss_list)
 
-def random_generate(init_txt,tokenizer,model,max_length,top_k=None,temperature=1):
+def random_generate(init_txt,tokenizer,model,max_length,top_k=None,temperature=0):
     model.eval()
     model.reset_cache()
     with torch.no_grad():
@@ -32,7 +32,8 @@ def random_generate(init_txt,tokenizer,model,max_length,top_k=None,temperature=1
             else:
                 logits=model(next_id,use_cache=True)
             logits=logits[:,-1]
-            logits=logits/temperature
+            if temperature>0:
+                logits=logits/temperature
             if top_k is not None:
                 top_value,top_id=torch.topk(logits,top_k)
                 probs=torch.nn.functional.softmax(top_value,dim=-1)
@@ -172,7 +173,7 @@ def load_gpt2():
 def eval():
     gpt2=load_gpt2()
     tokenizer=tiktoken.get_encoding("gpt2") 
-    print(random_generate("Every effort moves you",tokenizer,gpt2,64))
+    print(random_generate("Every effort moves you",tokenizer,gpt2,64,top_k=50))
 
 
    
