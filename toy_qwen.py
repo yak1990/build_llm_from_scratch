@@ -21,6 +21,43 @@ class FeedForward(nn.Module):
         x=self.fc3(x)
         return x
 
+# MOE 占用硬盘、内存、GPU过大，这里不在本地进一步实现了
+class MoEFeedForward(nn.Module):
+    def __init__(self,num_experts,num_experts_per_tok,emb_dim,hidden_dim, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self.num_experts=num_experts
+        self.num_experts_per_tok=num_experts_per_tok
+
+        self.gete=nn.Linear(emb_dim,num_experts,bias=False)
+        meta_device=torch.device('meta')
+        self.ff_list=nn.ModuleList([
+            FeedForward(emb_dim,hidden_dim,bias=False,device=meta_device) for _ in range(num_experts)
+        ])
+    
+    def forward(self,x):
+        score=self.gete(x)
+        topk_score,topk_indices=torch.topk(score,self.num_experts_per_tok,dim=-1)
+        topk_prob=torch.softmax(topk_score)
+
+        expert_output=[]
+        for ff in self.ff_list:
+            expert_output.append(ff(x).unsqueeze(-2))
+        expert_output=torch.cat(expert_output,dim=-2)
+
+        gate_prob=torch.zeros_like(score)
+        for i in range(self.num_experts_per_tok):
+            id=topk_indices[...,i:i+1]
+            prob=topk_prob[...,i:i+1]
+            gate_prob.scatter_(dim=-1,index=id,src=prob)
+        
+        gate_prob=gate_prob.unsqueeze(-1)
+        out=(export_output*gate_prob).sum(dim=-2)
+
+        return out
+
+
+
 class RMSNorm(nn.Module):
     def __init__(self, emb_dim,eps=1e-6,bias=False,*args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -101,7 +138,7 @@ class GroupMultiHeadAttention(nn.Module):
         self.out_proj=nn.Linear(num_heads*self.head_dim,input_dim,bias=False)
         
 
-    def forward(self,x,mask,cos,sin):
+    def forward(self,x,mask,cos,sin,cache_data=None,layer_id=None):
         B,L,D=x.shape
 
         q=self.q_layer(x).view(B,L,self.num_heads,self.head_dim).transpose(1,2)
@@ -117,6 +154,20 @@ class GroupMultiHeadAttention(nn.Module):
 
         k=torch.repeat_interleave(k,self.group_size,dim=1)
         v=torch.repeat_interleave(v,self.group_size,dim=1)
+
+
+
+        if cache_data is not None:
+            cache=cache_data.get(layer_id)
+            if cache is not None:
+                his_k,his_v=cache
+                k=torch.cat([his_k,k],dim=2)
+                v=torch.cat([his_v,v],dim=2)
+            cache_data.update(layer_id,(k,v))
+
+        # print(layer_id,'q',q[0,0,:3,:5])
+        # print(layer_id,'k',k[0,0,:3,:5])
+        # print(layer_id,'v',v[0,0,:3,:5])
 
         atten_score=q@k.transpose(2,3)
         atten_score=atten_score/self.head_norm
@@ -146,11 +197,11 @@ class TransformBlock(nn.Module):
         self.ffn=FeedForward(input_dim,hidden_dim)
         self.drop_out2=nn.Dropout(drop_out)
     
-    def forward(self,x,mask,cos,sin):
+    def forward(self,x,mask,cos,sin,cache_data=None,layer_id=None):
         short_cut_x=x
 
         x=self.norm1(x)
-        x=self.attn(x,mask,cos,sin)
+        x=self.attn(x,mask,cos,sin,cache_data,layer_id)
         x=self.drop_out(x)
         x=x+short_cut_x
 
@@ -188,19 +239,55 @@ class Qwen(nn.Module):
         self.register_buffer('cos',cos,persistent=False)
         self.register_buffer('sin',sin,persistent=False)
     
-    def forward(self,x):
+    def forward(self,x,cache_data=None):
         L=x.shape[1]
-        mask=torch.triu(torch.ones(L,L,device=x.device),diagonal=1).bool()
+
+        if cache_data is None:
+            mask=torch.triu(torch.ones(L,L,device=x.device),diagonal=1).bool()
+            cos,sin=self.cos,self.sin
+        else:
+            L_cache=cache_data.get_pos()
+            if L_cache==0:
+                mask=torch.triu(torch.ones(L,L,device=x.device),diagonal=1).bool()
+            else:
+                col=torch.arange(L_cache+L,device=x.device)
+                row=torch.arange(L_cache,L_cache+L,device=x.device)
+                mask=row[:,None]<col[None,:]
+            cos,sin=self.cos[L_cache:],self.sin[L_cache:]
+            cache_data.update_pos(L)
 
         x=self.t_embeding(x)
 
-        for trf in self.trf_blocks:
-            x=trf(x,mask,self.cos,self.sin)
+        for trf_id,trf in enumerate(self.trf_blocks):
+            x=trf(x,mask,cos,sin,cache_data,trf_id)
 
         x=self.fin_norm(x)
         x=self.fin_layer(x)
 
         return x
+
+
+class KV_Cache:
+    def __init__(self,layer_num) -> None:
+        self.layer_num=layer_num
+        self.reset_cache()
+
+    def get(self,layer_id):
+        return self.cache[layer_id]
+    
+    def update(self,layer_id,layer_data):
+        self.cache[layer_id]=layer_data
+
+    def get_pos(self):
+        return self.pos_id
+    
+    def update_pos(self,update_length):
+        self.pos_id+=update_length
+
+    def reset_cache(self):
+        self.cache=[None for _ in range(self.layer_num)]
+        self.pos_id=0
+
 
 class QwenTokenizer:
     _SPECIALS = [
@@ -301,16 +388,20 @@ def get_qwen():
 
 def generate_text_stream(model,ids,max_new_tokens=100,eos_token_id=None):
     model.eval()
+    cache_data=KV_Cache(len(model.trf_blocks))
     with torch.no_grad():
         for _ in range(max_new_tokens):
-            out=model(ids)[:,-1]
+            out=model(ids,cache_data)[:,-1]
             next_token=out.argmax(dim=-1,keepdim=True)
 
             if eos_token_id is not None and torch.all(next_token==eos_token_id):
                 break
             yield next_token
 
-            ids=torch.cat([ids,next_token],dim=-1)
+            if cache_data is None:
+                ids=torch.cat([ids,next_token],dim=-1)
+            else:
+                ids=next_token
 
 def test_generate():
     tokenizer=QwenTokenizer(r'Qwen3-0.6B/tokenizer.json',True,True,True)
