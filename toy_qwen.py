@@ -68,7 +68,7 @@ def apply_rope(x,cos,sin):
 
 
 class GroupMultiHeadAttention(nn.Module):
-    def __init__(self,input_dim,num_heads,kv_group_nums,drop_out=0.1,qk_norm=False,qkv_bias=False, *args, **kwargs) -> None:
+    def __init__(self,input_dim,num_heads,kv_group_nums,head_dim=None,drop_out=0.1,qk_norm=False,qkv_bias=False, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         assert input_dim%num_heads==0
@@ -79,21 +79,24 @@ class GroupMultiHeadAttention(nn.Module):
         self.kv_group_nums=kv_group_nums
 
         self.group_size=self.num_heads//self.kv_group_nums
-        self.head_dim=input_dim//num_heads
+        if head_dim is None:
+            self.head_dim=input_dim//num_heads
+        else:
+            self.head_dim=head_dim
         self.head_norm=self.head_dim**0.5
 
-        self.q_layer=nn.Linear(input_dim,input_dim,bias=qkv_bias)
+        self.q_layer=nn.Linear(input_dim,num_heads*self.head_dim,bias=qkv_bias)
         self.k_layer=nn.Linear(input_dim,kv_group_nums*self.head_dim,bias=qkv_bias)
         self.v_layer=nn.Linear(input_dim,kv_group_nums*self.head_dim,bias=qkv_bias)
 
         self.qk_norm=qk_norm
         if qk_norm:
             self.q_norm=RMSNorm(self.head_dim)
-            self.v_norm=RMSNorm(self.head_dim)
+            self.k_norm=RMSNorm(self.head_dim)
 
         self.dropout_layer=nn.Dropout(drop_out)
 
-        self.out_proj=nn.Linear(input_dim,input_dim)
+        self.out_proj=nn.Linear(num_heads*self.head_dim,input_dim,bias=False)
         
 
     def forward(self,x,mask,cos,sin):
@@ -105,7 +108,7 @@ class GroupMultiHeadAttention(nn.Module):
 
         if self.qk_norm:
             q=self.q_norm(q)
-            k=self.v_norm(k)
+            k=self.k_norm(k)
         
         q=apply_rope(q,cos,sin)
         k=apply_rope(k,cos,sin)
@@ -130,11 +133,11 @@ class GroupMultiHeadAttention(nn.Module):
 
 
 class TransformBlock(nn.Module):
-    def __init__(self,input_dim,num_head,kv_group_nums,hidden_dim,drop_out,qk_norm, *args, **kwargs) -> None:
+    def __init__(self,input_dim,num_head,kv_group_nums,hidden_dim,drop_out,qk_norm,head_dim=None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         self.norm1=RMSNorm(input_dim)
-        self.attn=GroupMultiHeadAttention(input_dim,num_head,kv_group_nums,drop_out,qk_norm)
+        self.attn=GroupMultiHeadAttention(input_dim,num_head,kv_group_nums,head_dim=head_dim,drop_out=drop_out,qk_norm=qk_norm)
         self.drop_out=nn.Dropout(drop_out)
 
         self.norm2=RMSNorm(input_dim)
@@ -160,6 +163,7 @@ class TransformBlock(nn.Module):
 class Qwen(nn.Module):
     def __init__(self,vocab_size,emb_dim,num_head,kv_group_nums,hidden_dim,num_layers,
                     drop_out=0.1,qk_norm=False, 
+                    head_dim=None,
                     rope_base=10000,context_length=4096,
                     *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -168,14 +172,15 @@ class Qwen(nn.Module):
 
         self.trf_blocks=nn.ModuleList(
             [
-                TransformBlock(emb_dim,num_head,kv_group_nums,hidden_dim,drop_out,qk_norm) for _ in range(num_layers)
+                TransformBlock(emb_dim,num_head,kv_group_nums,hidden_dim,drop_out,qk_norm,head_dim) for _ in range(num_layers)
             ]
         )
 
         self.fin_norm=RMSNorm(emb_dim)
         self.fin_layer=nn.Linear(emb_dim,vocab_size,bias=False)
 
-        head_dim=emb_dim//num_head
+        if head_dim is None:
+            head_dim=emb_dim//num_head
         cos,sin=generate_rope_params(head_dim,rope_base,context_length)
 
         self.register_buffer('cos',cos,persistent=False)
@@ -197,12 +202,54 @@ class Qwen(nn.Module):
 
 
 
-
-
 def main():
-    a=Qwen(1000,64,8,2,32,4)
-    b=torch.randint(0,1000,(2,10))
-    print(a(b).shape)
+
+    from safetensors.torch import load_file
+    weight_path=r'Qwen3-0.6B/model.safetensors'
+    qwen_weight=load_file(weight_path)
+
+    
+    vocab_size=151936
+    emb_dim=1024
+    num_head=16
+    head_dim=128
+    kv_group_num=8
+    rope_base=1_000_000
+    context_length=40960
+    hidden_dim=3072
+    num_layer=28
+    qk_norm=True
+
+    model=Qwen(vocab_size,emb_dim,num_head,kv_group_num,hidden_dim,num_layer,rope_base=rope_base,context_length=context_length,head_dim=head_dim,qk_norm=qk_norm)
+
+    
+    def assign(model_params,weight,weight_name):
+        assert model_params.shape==weight[weight_name].shape
+        out=nn.Parameter(weight[weight_name])
+        return out
+    model.t_embeding.weight=assign(model.t_embeding.weight,qwen_weight,'model.embed_tokens.weight')
+    model.fin_norm.scale=assign(model.fin_norm.scale,qwen_weight,'model.norm.weight')
+    model.fin_layer.weight=assign(model.fin_layer.weight,qwen_weight,'lm_head.weight')
+    for id in range(num_layer):
+        model.trf_blocks[id].norm1.scale=assign(model.trf_blocks[id].norm1.scale,qwen_weight,f'model.layers.{id}.input_layernorm.weight')
+        model.trf_blocks[id].attn.q_layer.weight=assign(model.trf_blocks[id].attn.q_layer.weight,qwen_weight,f'model.layers.{id}.self_attn.q_proj.weight')
+        model.trf_blocks[id].attn.q_norm.scale=assign(model.trf_blocks[id].attn.q_norm.scale,qwen_weight,f'model.layers.{id}.self_attn.q_norm.weight')
+        model.trf_blocks[id].attn.k_layer.weight=assign(model.trf_blocks[id].attn.k_layer.weight,qwen_weight,f'model.layers.{id}.self_attn.k_proj.weight')
+        model.trf_blocks[id].attn.k_norm.scale=assign(model.trf_blocks[id].attn.k_norm.scale,qwen_weight,f'model.layers.{id}.self_attn.k_norm.weight')
+        model.trf_blocks[id].attn.v_layer.weight=assign(model.trf_blocks[id].attn.v_layer.weight,qwen_weight,f'model.layers.{id}.self_attn.v_proj.weight')
+        model.trf_blocks[id].attn.out_proj.weight=assign(model.trf_blocks[id].attn.out_proj.weight,qwen_weight,f'model.layers.{id}.self_attn.o_proj.weight')
+        model.trf_blocks[id].norm2.scale=assign(model.trf_blocks[id].norm2.scale,qwen_weight,f'model.layers.{id}.post_attention_layernorm.weight')
+        model.trf_blocks[id].ffn.fc1.weight=assign(model.trf_blocks[id].ffn.fc1.weight,qwen_weight,f'model.layers.{id}.mlp.gate_proj.weight')
+        model.trf_blocks[id].ffn.fc2.weight=assign(model.trf_blocks[id].ffn.fc2.weight,qwen_weight,f'model.layers.{id}.mlp.up_proj.weight')
+        model.trf_blocks[id].ffn.fc3.weight=assign(model.trf_blocks[id].ffn.fc3.weight,qwen_weight,f'model.layers.{id}.mlp.down_proj.weight')
+    
+
+    model=model.float().cuda() 
+    
+    
+    
+    b=torch.randint(0,1000,(2,10)).cuda()
+    print(model(b).shape)
 
 if __name__=='__main__':
     main()
