@@ -1,9 +1,11 @@
 # copy from https://github.com/rasbt/LLMs-from-scratch/tree/main/ch05/11_qwen3
 
+from unittest import skip
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import re
+from tokenizers import Tokenizer
 
 class FeedForward(nn.Module):
     def __init__(self,emb_dim,hidden_dim,bias=False, *args, **kwargs) -> None:
@@ -200,15 +202,64 @@ class Qwen(nn.Module):
 
         return x
 
+class QwenTokenizer:
+    _SPECIALS = [
+        "<|endoftext|>",
+        "<|im_start|>", "<|im_end|>",
+        "<|object_ref_start|>", "<|object_ref_end|>",
+        "<|box_start|>", "<|box_end|>",
+        "<|quad_start|>", "<|quad_end|>",
+        "<|vision_start|>", "<|vision_end|>",
+        "<|vision_pad|>", "<|image_pad|>", "<|video_pad|>",
+    ]
+    _SPLIT_RE = re.compile(r"(<\|[^>]+?\|>)")
+    def __init__(self,tokenizer_file_path=None,apply_chat_template=False,add_generation_prompt=False,add_thinking=False) -> None:
+        self.apply_chat_template=apply_chat_template
+        self.add_generation_prompt=add_generation_prompt
+        self.add_thinking=add_thinking
 
+        self._tok=Tokenizer.from_file(tokenizer_file_path)
+        self._special_to_id={t:self._tok.token_to_id(t) for t in self._SPECIALS}
 
-def main():
+        self.pad_token_id=self._special_to_id['<|endoftext|>']
+        self.eos_token_id=self.pad_token_id
+
+    def encode(self,text):
+        stripped_text=text.strip()
+
+        if stripped_text in self._special_to_id and '\n' not in stripped_text:
+            return [self._special_to_id[stripped_text]]
+        
+        if self.apply_chat_template:
+            text=self.warp_chat(stripped_text)
+        
+        ids=[]
+        for parts in filter(None,self._SPLIT_RE.split(text)):
+            if parts in self._special_to_id:
+                ids.append(self._special_to_id[parts])
+            else:
+                ids.extend(self._tok.encode(parts).ids)
+        return ids
+    
+    def decode(self,ids):
+        return self._tok.decode(ids,skip_special_tokens=False)
+
+    def warp_chat(self,user_msg):
+        s=f'<|im_start|>user\n{user_msg}<|im_end|>\n'
+        if self.add_generation_prompt:
+            s+=f'<|im_start|>assistant'
+            if self.add_thinking:
+                s+='\n'
+            else:
+                s+='\n<think>\n\n</think>\n\n'
+        return s
+
+def get_qwen():
 
     from safetensors.torch import load_file
     weight_path=r'Qwen3-0.6B/model.safetensors'
     qwen_weight=load_file(weight_path)
 
-    
     vocab_size=151936
     emb_dim=1024
     num_head=16
@@ -246,10 +297,61 @@ def main():
 
     model=model.float().cuda() 
     
+    return model
+
+def generate_text_stream(model,ids,max_new_tokens=100,eos_token_id=None):
+    model.eval()
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            out=model(ids)[:,-1]
+            next_token=out.argmax(dim=-1,keepdim=True)
+
+            if eos_token_id is not None and torch.all(next_token==eos_token_id):
+                break
+            yield next_token
+
+            ids=torch.cat([ids,next_token],dim=-1)
+
+def test_generate():
+    tokenizer=QwenTokenizer(r'Qwen3-0.6B/tokenizer.json',True,True,True)
+    prompt = "Give me a short introduction to large language models."
+    prompt='你好，请介绍下自己'
+    ids=tokenizer.encode(prompt)
+    text=tokenizer.decode(ids)
+    print(prompt)
+    print(text)
+
+    model=get_qwen()
+
+    ids=torch.tensor(ids).cuda().unsqueeze(0)
+    model=model.cuda()
+    for token in generate_text_stream(model,ids,max_new_tokens=1000,eos_token_id=tokenizer.eos_token_id):
+        token_id=token.squeeze(0).tolist()
+        print(tokenizer.decode(token_id),end='',flush=True)
+
+
+def test_qwen():
+
+    model=get_qwen()
+    
     
     
     b=torch.randint(0,1000,(2,10)).cuda()
     print(model(b).shape)
+
+def test_tokenizer():
+    tokenizer=QwenTokenizer(r'Qwen3-0.6B/tokenizer.json',True,True,True)
+    prompt = "Give me a short introduction to large language models."
+    ids=tokenizer.encode(prompt)
+    text=tokenizer.decode(ids)
+    print(prompt)
+    print(text)
+
+def main():
+    # test_qwen()
+    # test_tokenizer()
+    test_generate()
+
 
 if __name__=='__main__':
     main()
