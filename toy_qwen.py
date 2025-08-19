@@ -386,13 +386,21 @@ def get_qwen():
     
     return model
 
-def generate_text_stream(model,ids,max_new_tokens=100,eos_token_id=None):
+def generate_text_stream(model,ids,max_new_tokens=1000,eos_token_id=None,top_k=None,temperature=0):
     model.eval()
     cache_data=KV_Cache(len(model.trf_blocks))
     with torch.no_grad():
         for _ in range(max_new_tokens):
             out=model(ids,cache_data)[:,-1]
-            next_token=out.argmax(dim=-1,keepdim=True)
+
+            if temperature>0:
+                out=out/temperature
+            if top_k is not None:
+                top_value,top_id=torch.topk(out,top_k)
+                probs=torch.nn.functional.softmax(top_value,dim=-1)
+                next_token=top_id[:,torch.multinomial(probs,num_samples=1)][:,0,:]
+            else:
+                next_token=out.argmax(dim=-1,keepdim=True)
 
             if eos_token_id is not None and torch.all(next_token==eos_token_id):
                 break
@@ -416,7 +424,7 @@ def test_generate():
 
     ids=torch.tensor(ids).cuda().unsqueeze(0)
     model=model.cuda()
-    for token in generate_text_stream(model,ids,max_new_tokens=1000,eos_token_id=tokenizer.eos_token_id):
+    for token in generate_text_stream(model,ids,max_new_tokens=1000,eos_token_id=tokenizer.eos_token_id,top_k=50,temperature=1.2):
         token_id=token.squeeze(0).tolist()
         print(tokenizer.decode(token_id),end='',flush=True)
 
