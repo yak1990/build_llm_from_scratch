@@ -3,7 +3,7 @@
 
 
 # 代码 todo
-1. load  qwen 模型
+1. ~~load  qwen 模型~~
 2. 使用qwen模型，进行 instruct finetune
 3. 使用sft 的qwen模型，进行DPO训练
 4. 训练一个翻译的gpt
