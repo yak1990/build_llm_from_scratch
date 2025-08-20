@@ -7,6 +7,8 @@ import math
 from torch.amp import autocast,GradScaler
 from torch.optim.lr_scheduler import LambdaLR
 import random
+import numpy as np
+
 
 def read_all_data(f_path):
     with open(f_path,'r') as f:
@@ -18,17 +20,28 @@ def formart_instruct_data(input_data):
     input=input_data['input'].strip()
     output=input_data['output'].strip()
     instruction = (
+        f'<|im_start|>user\n'
         f"Below is an instruction that describes a task. "
         f"Write a response that appropriately completes the request."
-        f"\n\n### Instruction:\n{instruction}"
+        f'<|im_end|>\n'
+        f'<|im_start|>Instruction\n'
+        f"{instruction}"
+        f'<|im_end|>\n'
     )
 
-    input = f"\n\n### Input:\n{input}" if input else ""
+    input = (
+                f"<|im_start|>Input:\n"
+                f"{input}"
+                f"<|im_end|>\n"
+            ) if input else ""
 
-    output_begin = f"\n\n### response:\n"
+    output_text = (
+                    f"<|im_start|>response:\n"
+                    f"{output}"
+                    f"<|im_end|>\n"
+                  )
 
-    input_text=instruction+input+output_begin
-    output_text=output
+    input_text=instruction+input
 
     return input_text,output_text
 
@@ -61,11 +74,16 @@ def collate_fn(batch,padding_token_id,ignore_id):
     input_list=[]
     target_list=[]
     for i in batch:
-        input_len=len(i[0])
-        output_len=len(i[1])
+        # input_len=len(i[0])
+        # output_len=len(i[1])
 
-        now_input=i[0]+i[1]+[padding_token_id]*(max_len-input_len-output_len)
-        now_output=[ignore_id]*(input_len-1)+i[1]+[ignore_id]*(max_len+1-input_len-output_len)
+        # now_input=i[0]+i[1]+[padding_token_id]*(max_len-input_len-output_len)
+        # now_output=[ignore_id]*(input_len-1)+i[1]+[ignore_id]*(max_len+1-input_len-output_len)
+
+        full_ids=i[0]+i[1]
+        full_len=len(full_ids)
+        now_input=full_ids+[padding_token_id]*(max_len-full_len)
+        now_output=full_ids[1:]+[ignore_id]*(max_len+1-full_len)
 
         input_list.append(now_input)
         target_list.append(now_output)
@@ -97,6 +115,8 @@ def lr_lambda(step,init_lr,lr,min_lr,warm_up_num,train_count_num):
     if run_count<warm_up_num:
         init_w=1-run_count/warm_up_num
         now_lr=init_lr*init_w+lr*(1-init_w)
+    elif run_count<train_count_num*0.75:
+        now_lr=lr
     else:
         progress=(run_count-warm_up_num)/(train_count_num-warm_up_num)
         now_lr=min_lr+(lr-min_lr)*0.5*(1+math.cos(progress*math.pi))
@@ -104,10 +124,10 @@ def lr_lambda(step,init_lr,lr,min_lr,warm_up_num,train_count_num):
 
 def train():
     f_path=r'RawTextData/instruction_data.json'
-    batch_size=2
+    batch_size=8
     vocab_size=151936
 
-    epochs=10
+    epochs=20
 
     # 加载数据集，分为训练集、测试集
     # 创建dataloader
@@ -117,6 +137,7 @@ def train():
 
     # # 设置网络
     model=toy_qwen.get_qwen()
+    # model=torch.compile(model)
     
 
     # copy from gpt5
@@ -133,9 +154,9 @@ def train():
     warm_up_ratio=0.1
     optimizer=torch.optim.AdamW(model.parameters(),lr=init_lr,weight_decay=weight_decay)
     
-    # 优化时，使用warm up与cos decay
-    lr_func=partial(lr_lambda,init_lr=init_lr,lr=lr,min_lr=min_lr,warm_up_num=warm_up_ratio*max_run_count,train_count_num=max_run_count)
-    scheduler=LambdaLR(optimizer,lr_lambda=lr_func)
+    # # 优化时，使用warm up与cos decay
+    # lr_func=partial(lr_lambda,init_lr=init_lr,lr=lr,min_lr=min_lr,warm_up_num=warm_up_ratio*max_run_count,train_count_num=max_run_count)
+    # scheduler=LambdaLR(optimizer,lr_lambda=lr_func)
 
     scaler=GradScaler(enabled=(device=='cuda'))
 
@@ -190,7 +211,7 @@ def train():
            
 
 
-    test_generate()
+    # test_generate()
 
     # 训练
     for epoch in range(epochs):
@@ -202,8 +223,8 @@ def train():
         for batch in train_loader:
             now_loss=train_step(*handle_batch(batch))
             epoch_train.append(now_loss)
-            print(now_loss)
-            scheduler.step()
+            # print(now_loss)
+            # scheduler.step()
         
 
         # run eval
@@ -215,11 +236,12 @@ def train():
                 epoch_eval.append(now_loss)
 
         # print(f'epoch:{epoch},train loss:{eval_model(model,train_loader)}')
-        print(f'epoch:{epoch},train loss:{len(epoch_train)}')
-        print(f'epoch:{epoch},eval loss:{len(epoch_eval)}')
+        print(f'epoch:{epoch},train loss:{np.mean(epoch_train)}')
+        print(f'epoch:{epoch},eval loss:{np.mean(epoch_eval)}')
         # 生成文本
         # print(f'{epoch} generate')
-        test_generate()
+        if epoch>0 and epoch%5==0:
+            test_generate()
 
     # print(his_lr)
     # import matplotlib.pyplot as plt
@@ -235,22 +257,22 @@ def train():
 
 def main():
     f_path=r'RawTextData/instruction_data.json'
-    tokenizer,train_loader,eval_loader=get_data(f_path,batch_size=8)
+    tokenizer,_,_,train_loader,eval_loader=get_data(f_path,batch_size=8)
     for id,i in enumerate(eval_loader):
         print('-'*100)
         print(id)
         input_list,target_list=i
 
-        # for j_id in range(len(input_list)):
-        #     input_str=tokenizer.decode(input_list[j_id].tolist())
-        #     output_str=tokenizer.decode([j for j in target_list[j_id].tolist() if j>=0])
-        #     print(input_str)
-        #     print(output_str)
+        for j_id in range(len(input_list)):
+            input_str=tokenizer.decode(input_list[j_id].tolist())
+            output_str=tokenizer.decode([j for j in target_list[j_id].tolist() if j>=0])
+            print('input_str\n',input_str)
+            print('output_str\n',output_str)
 
         print(input_list.shape)
         print(target_list.shape)
-        # if id>3:
-        #     break
+        if id>1:
+            break
    
 if __name__=='__main__':
     # main()
