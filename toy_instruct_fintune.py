@@ -115,14 +115,21 @@ def lr_lambda(step,init_lr,lr,min_lr,warm_up_num,train_count_num):
     if run_count<warm_up_num:
         init_w=1-run_count/warm_up_num
         now_lr=init_lr*init_w+lr*(1-init_w)
-    elif run_count<train_count_num*0.75:
-        now_lr=lr
+    # elif run_count<train_count_num*0.75:
+    #     now_lr=lr
     else:
         progress=(run_count-warm_up_num)/(train_count_num-warm_up_num)
         now_lr=min_lr+(lr-min_lr)*0.5*(1+math.cos(progress*math.pi))
-    return now_lr
+    
+    out=now_lr/init_lr
+    return out
 
 def train():
+    import os
+
+    out_dir='qwen_finetune'
+    os.makedirs(out_dir,exist_ok=True)
+
     f_path=r'RawTextData/instruction_data.json'
     batch_size=8
     vocab_size=151936
@@ -147,16 +154,16 @@ def train():
 
 
     # 设置优化器
-    init_lr=1e-5
-    lr=1e-4
+    init_lr=1e-6
+    lr=1e-5
     min_lr=1e-6
     weight_decay=1e-4
     warm_up_ratio=0.1
     optimizer=torch.optim.AdamW(model.parameters(),lr=init_lr,weight_decay=weight_decay)
     
-    # # 优化时，使用warm up与cos decay
-    # lr_func=partial(lr_lambda,init_lr=init_lr,lr=lr,min_lr=min_lr,warm_up_num=warm_up_ratio*max_run_count,train_count_num=max_run_count)
-    # scheduler=LambdaLR(optimizer,lr_lambda=lr_func)
+    # 优化时，使用warm up与cos decay
+    lr_func=partial(lr_lambda,init_lr=init_lr,lr=lr,min_lr=min_lr,warm_up_num=warm_up_ratio*max_run_count,train_count_num=max_run_count)
+    scheduler=LambdaLR(optimizer,lr_lambda=lr_func)
 
     scaler=GradScaler(enabled=(device=='cuda'))
 
@@ -214,6 +221,7 @@ def train():
     # test_generate()
 
     # 训练
+    min_eval_loss=None
     for epoch in range(epochs):
         model.train()
         epoch_train=[]
@@ -224,7 +232,9 @@ def train():
             now_loss=train_step(*handle_batch(batch))
             epoch_train.append(now_loss)
             # print(now_loss)
-            # scheduler.step()
+            scheduler.step()
+
+            # print(optimizer.state_dict()['param_groups'][0]['lr']) 
         
 
         # run eval
@@ -242,6 +252,12 @@ def train():
         # print(f'{epoch} generate')
         if epoch>0 and epoch%5==0:
             test_generate()
+
+        now_eval_loss=np.mean(epoch_eval)
+        if min_eval_loss is None or now_eval_loss<min_eval_loss:
+            out_path=os.path.join(out_dir,f'{epoch}_{now_eval_loss}.pth')
+            torch.save(model.state_dict(),out_path)
+            min_eval_loss=now_eval_loss
 
     # print(his_lr)
     # import matplotlib.pyplot as plt
