@@ -19,31 +19,34 @@ def formart_instruct_data(input_data):
     instruction=input_data['instruction'].strip()
     input=input_data['input'].strip()
     output=input_data['output'].strip()
-    instruction = (
-        f'<|im_start|>user\n'
-        f"Below is an instruction that describes a task. "
-        f"Write a response that appropriately completes the request."
-        f'<|im_end|>\n'
+
+
+    instruction_text = (
+        # f'<|im_start|>user\n'
+        # f"Below is an instruction that describes a task. "
+        # f"Write a response that appropriately completes the request."
+        # f'<|im_end|>\n'
         f'<|im_start|>Instruction\n'
         f"{instruction}"
         f'<|im_end|>\n'
     )
 
-    input = (
+    input_text = (
                 f"<|im_start|>Input:\n"
                 f"{input}"
                 f"<|im_end|>\n"
             ) if input else ""
+    prompt_text=instruction_text+input_text
 
-    output_text = (
-                    f"<|im_start|>response:\n"
-                    f"{output}"
-                    f"<|im_end|>\n"
-                  )
+    output_text=(
+        f'{prompt_text}'
+        f"<|im_start|>Response:\n"
+        f"{output}"
+        f"<|im_end|>"
+    )
+    
 
-    input_text=instruction+input
-
-    return input_text,output_text
+    return prompt_text,output_text
 
 
 
@@ -52,24 +55,25 @@ class InstructDataset(Dataset):
         super().__init__()
         self.tokenizer=tokenizer
 
-        input_list=[]
-        output_list=[]
+        prompt_list=[]
+        text_list=[]
         for i in data_list:
-            input_text,output_text=formart_instruct_data(i)
-            input_list.append(tokenizer.encode(input_text))
-            output_list.append(tokenizer.encode(output_text)+[tokenizer.eos_token_id])
+            prompt_text,output_text=formart_instruct_data(i)
+            prompt_list.append(tokenizer.encode(prompt_text))
+            text_list.append(tokenizer.encode(output_text)+[tokenizer.eos_token_id])
 
-        self.input_list=input_list
-        self.output_list=output_list
+        self.prompt_list=prompt_list
+        self.output_list=text_list
         
     def __len__(self):
-        return len(self.input_list)
+        return len(self.prompt_list)
     
     def __getitem__(self, index):
-        return self.input_list[index],self.output_list[index]
+        return self.prompt_list[index],self.output_list[index]
 
 def collate_fn(batch,padding_token_id,ignore_id):
-    max_len=max([len(i[0])+len(i[1]) for i in batch])
+    # max_len=max([len(i[0])+len(i[1]) for i in batch])
+    max_len=max([len(i[1]) for i in batch])
 
     input_list=[]
     target_list=[]
@@ -80,10 +84,15 @@ def collate_fn(batch,padding_token_id,ignore_id):
         # now_input=i[0]+i[1]+[padding_token_id]*(max_len-input_len-output_len)
         # now_output=[ignore_id]*(input_len-1)+i[1]+[ignore_id]*(max_len+1-input_len-output_len)
 
-        full_ids=i[0]+i[1]
+        prompt_len=len(i[0])
+
+        full_ids=i[1]
         full_len=len(full_ids)
         now_input=full_ids+[padding_token_id]*(max_len-full_len)
-        now_output=full_ids[1:]+[ignore_id]*(max_len+1-full_len)
+
+        now_output=[ignore_id]*prompt_len+full_ids[prompt_len:]+[ignore_id]*(max_len-full_len)
+        now_output=now_output[1:]+[ignore_id]
+
 
         input_list.append(now_input)
         target_list.append(now_output)
@@ -131,7 +140,7 @@ def train():
     os.makedirs(out_dir,exist_ok=True)
 
     f_path=r'RawTextData/instruction_data.json'
-    batch_size=8
+    batch_size=16
     vocab_size=151936
 
     epochs=20
@@ -158,7 +167,7 @@ def train():
     lr=1e-5
     min_lr=1e-6
     weight_decay=1e-4
-    warm_up_ratio=0.1
+    warm_up_ratio=0.4
     optimizer=torch.optim.AdamW(model.parameters(),lr=init_lr,weight_decay=weight_decay)
     
     # 优化时，使用warm up与cos decay
@@ -222,6 +231,7 @@ def train():
 
     # 训练
     min_eval_loss=None
+    best_path=None
     for epoch in range(epochs):
         model.train()
         epoch_train=[]
@@ -255,9 +265,14 @@ def train():
 
         now_eval_loss=np.mean(epoch_eval)
         if min_eval_loss is None or now_eval_loss<min_eval_loss:
-            out_path=os.path.join(out_dir,f'{epoch}_{now_eval_loss}.pth')
+            if best_path is not None and os.path.exists(best_path):
+                os.remove(best_path)
+            out_path=os.path.join(out_dir,f'best:{now_eval_loss}.pth')
             torch.save(model.state_dict(),out_path)
             min_eval_loss=now_eval_loss
+            best_path=out_path
+        out_path=os.path.join(out_dir,f'{epoch}_{now_eval_loss}.pth')
+        torch.save(model.state_dict(),out_path)
 
     # print(his_lr)
     # import matplotlib.pyplot as plt
@@ -282,14 +297,22 @@ def main():
         for j_id in range(len(input_list)):
             input_str=tokenizer.decode(input_list[j_id].tolist())
             output_str=tokenizer.decode([j for j in target_list[j_id].tolist() if j>=0])
+            print()
             print('input_str\n',input_str)
+            print()
             print('output_str\n',output_str)
+            print()
+            if j_id>0:
+                break
 
         print(input_list.shape)
         print(target_list.shape)
+        print(input_list[0])
+        print(target_list[0])
+        print()
         if id>1:
             break
    
 if __name__=='__main__':
-    # main()
-    train()
+    main()
+    # train()

@@ -6,9 +6,11 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from functools import partial
 import copy
+import random
 
 import toy_instruct_fintune
 import toy_qwen
+import numpy as np
 
 def formart_instruct_perference_data(input_data):
     instruction=input_data['instruction'].strip()
@@ -17,10 +19,10 @@ def formart_instruct_perference_data(input_data):
     input=input_data['input'].strip()
 
     instruction = (
-        f'<|im_start|>user\n'
-        f"Below is an instruction that describes a task. "
-        f"Write a response that appropriately completes the request."
-        f'<|im_end|>\n'
+        # f'<|im_start|>user\n'
+        # f"Below is an instruction that describes a task. "
+        # f"Write a response that appropriately completes the request."
+        # f'<|im_end|>\n'
         f'<|im_start|>Instruction\n'
         f"{instruction}"
         f'<|im_end|>\n'
@@ -35,15 +37,15 @@ def formart_instruct_perference_data(input_data):
 
     perfect_text=(
         f'{prompt}'
-        f"<|im_start|>response:\n"
+        f"<|im_start|>Response:\n"
         f"{perfect}"
-        f"<|im_end|>\n"
+        f"<|im_end|>"
     )
     reject_text=(
         f'{prompt}'
-        f"<|im_start|>response:\n"
+        f"<|im_start|>Response:\n"
         f"{reject}"
-        f"<|im_end|>\n"
+        f"<|im_end|>"
     )
 
     return prompt,perfect_text,reject_text
@@ -93,9 +95,11 @@ def collate_fn(batch,padding_token_id):
         perfect_data=now_perfect+[padding_token_id]*(max_perfect_len-len(now_perfect))
         reject_data=now_reject+[padding_token_id]*(max_reject_len-len(now_reject))
 
-        perfect_mask=[1]*(prompt_len)+[0]*(perfect_len-prompt_len)+[1]*(max_perfect_len-perfect_len)
+        front_mask=3
+        end_mask=3
+        perfect_mask=[1]*(prompt_len+front_mask)+[0]*(perfect_len-prompt_len-front_mask-end_mask)+[1]*(max_perfect_len-perfect_len+end_mask)
 
-        reject_mask=[1]*(prompt_len)+[0]*(reject_len-prompt_len)+[1]*(max_reject_len-reject_len)
+        reject_mask=[1]*(prompt_len+front_mask)+[0]*(reject_len-prompt_len-front_mask-end_mask)+[1]*(max_reject_len-reject_len+end_mask)
 
         out['prompt'].append(now_prompt)
         out['perfect'].append(perfect_data)
@@ -132,7 +136,10 @@ def compute_log_prob(model,input_data,target_mask):
     target_mask=target_mask[:,1:]
     log_prob=log_prob.gather(dim=-1,index=target.unsqueeze(-1)).squeeze(-1)
     log_prob=log_prob*(1-target_mask)
-    return log_prob.mean(dim=-1)
+
+    base_data=(1-target_mask).sum()
+    log_prob=log_prob.sum()/base_data
+    return log_prob
 
 def train():
     import os
@@ -154,8 +161,8 @@ def train():
 
     # # 设置网络
     model=toy_qwen.get_qwen()
-    # sft_path=r''
-    # model.load_state_dict(torch.load(sft_path))
+    sft_path=r'qwen_finetune/17_0.4794456735253334.pth'
+    model.load_state_dict(torch.load(sft_path))
     ref_model=copy.deepcopy(model)
     ref_model=ref_model.eval()
     for p in ref_model.parameters():
@@ -170,10 +177,10 @@ def train():
 
 
     # 设置优化器
-    init_lr=1e-6
-    lr=1e-5
-    min_lr=1e-6
-    weight_decay=1e-4
+    init_lr=1e-7
+    lr=1e-6
+    min_lr=1e-7
+    weight_decay=1e-2
     warm_up_ratio=0.1
     optimizer=torch.optim.AdamW(model.parameters(),lr=init_lr,weight_decay=weight_decay)
     
@@ -184,8 +191,8 @@ def train():
     scaler=GradScaler(enabled=(device=='cuda'))
 
     beta=0.1
-    min_batch_count=5
-    eval_batch_count=int(len(train_loader)/min_batch_count)
+    # min_batch_count=5
+    # eval_batch_count=int(len(train_loader)/min_batch_count)
 
     
     def run_once(model,ref_model,perfect_data,prefect_mask,reject_data,reject_mask):
@@ -207,48 +214,6 @@ def train():
 
             return loss,perfect_loss,reject_loss
 
-    # def train_step(model,ref_model,perfect_data,prefect_mask,reject_data,reject_mask):
-    #     optimizer.zero_grad()
-    #     with autocast(device_type=device,dtype=dtype):
-    #         with torch.no_grad():
-    #             ref_perfect_log_prob=compute_log_prob(ref_model,perfect_data,prefect_mask)
-    #             ref_reject_log_prob=compute_log_prob(ref_model,perfect_data,prefect_mask)
-    #             ref_log_prob=ref_perfect_log_prob-ref_reject_log_prob
-    #         perfect_log_prob=compute_log_prob(model,perfect_data,prefect_mask)
-    #         reject_log_prob=compute_log_prob(model,reject_data,reject_mask)
-    #         log_prob=perfect_log_prob-reject_log_prob
-
-    #         diff_log_prob=beta*(log_prob-ref_log_prob)
-    #         loss=-F.logsigmoid(diff_log_prob).mean()
-
-    #     if scaler.is_enabled():
-    #         scaler.scale(loss).backward()
-    #         scaler.step(optimizer)
-    #         scaler.update()
-    #     else:
-    #         loss.backward()
-    #         optimizer.step()
-    #     return loss.item()
-
-
-    # def eval_step(model,ref_model,perfect_data,prefect_mask,reject_data,reject_mask):
-    #     with autocast(device_type=device,dtype=dtype):
-            
-    #         ref_perfect_log_prob=compute_log_prob(ref_model,perfect_data,prefect_mask)
-    #         ref_reject_log_prob=compute_log_prob(ref_model,perfect_data,prefect_mask)
-    #         ref_log_prob=ref_perfect_log_prob-ref_reject_log_prob
-
-    #         perfect_log_prob=compute_log_prob(model,perfect_data,prefect_mask)
-    #         reject_log_prob=compute_log_prob(model,reject_data,reject_mask)
-    #         log_prob=perfect_log_prob-reject_log_prob
-
-    #         diff_log_prob=beta*(log_prob-ref_log_prob)
-    #         loss=-F.logsigmoid(diff_log_prob).mean()
-    #         perfect_loss=perfect_log_prob-ref_perfect_log_prob
-    #         reject_loss=reject_log_prob-ref_reject_log_prob
-
-    #         return loss.item(),perfect_loss.mean().item(),reject_loss.mean().item()
-
     def test_generate():
         model.eval()
         with torch.no_grad():
@@ -259,19 +224,30 @@ def train():
             perfect_text=tokenizer.decode([j for j in perfect_data if j>=0])
             reject_text=tokenizer.decode([j for j in reject_data if j>=0])
 
+            print()
             print(f'perfect_text : {perfect_text}')
+            print()
             print(f'reject_text : {reject_text}')
+            print()
             print(f'prompt : {input_text}')
+            print()
             print(f'model output:')
-            input_ids=torch.Tensor(x).int().cuda().unsqueeze(0)
-            for token in toy_qwen.generate_text_stream(model,input_ids,max_new_tokens=100,eos_token_id=tokenizer.eos_token_id,top_k=50,temperature=1.2):
+            input_ids=torch.Tensor(prompt).int().cuda().unsqueeze(0)
+            for token in toy_qwen.generate_text_stream(model,input_ids,max_new_tokens=100,eos_token_id=tokenizer.eos_token_id):
                 token_id=token.squeeze(0).tolist()
                 print(tokenizer.decode(token_id),end='',flush=True)
+
+            print(f'ref model output:')
+            input_ids=torch.Tensor(prompt).int().cuda().unsqueeze(0)
+            for token in toy_qwen.generate_text_stream(ref_model,input_ids,max_new_tokens=100,eos_token_id=tokenizer.eos_token_id):
+                token_id=token.squeeze(0).tolist()
+                print(tokenizer.decode(token_id),end='',flush=True)
+
             print()
            
 
 
-    # test_generate()
+    test_generate()
 
     # 训练
     min_eval_loss=None
@@ -283,35 +259,28 @@ def train():
         epoch_eval_reject=[]
 
         # run train
-        for _ in range(eval_batch_count):
-            for _ in range(min_batch_count):
-                loss_list=[]
-                for batch in train_loader:
+        for batch in train_loader:
 
                     
-                    perfect_data=batch['perfect'].to(device=device)
-                    perfect_mask=batch['perfect_mask'].to(device=device)
-                    reject_data=batch['reject'].to(device=device)
-                    reject_mask=batch['reject_mask'].to(device=device)
+            perfect_data=batch['perfect'].to(device=device)
+            perfect_mask=batch['perfect_mask'].to(device=device)
+            reject_data=batch['reject'].to(device=device)
+            reject_mask=batch['reject_mask'].to(device=device)
 
-                    loss,_,_=run_once(model,ref_model,perfect_data,perfect_mask,reject_data,reject_mask)
-                    loss_list.append(loss)
-                    epoch_train.append(loss.item())
+            loss,_,_=run_once(model,ref_model,perfect_data,perfect_mask,reject_data,reject_mask)
+            
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
-                    if len(loss_list)>=min_batch_count:
-                        break
-                
-                loss=torch.mean(torch.stack(loss_list))
-                if scaler.is_enabled():
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    loss.backward()
-                    optimizer.step()
+            scheduler.step()
+            epoch_train.append(loss.item())
 
-                scheduler.step()
-
+            # print(loss.item())
             # print(optimizer.state_dict()['param_groups'][0]['lr']) 
         
 
@@ -338,7 +307,8 @@ def train():
         print(f'epoch:{epoch},eval loss:{np.mean(epoch_eval_reject)}')
         # 生成文本
         # print(f'{epoch} generate')
-        if epoch>0 and epoch%5==0:
+        # if epoch>0 and epoch%5==0:
+        if True:
             test_generate()
 
         now_eval_loss=np.mean(epoch_eval)
@@ -368,21 +338,21 @@ def main():
         print(i['reject_mask'].shape)
 
 
-        print('perfect')
+        print('perfect'+'-'*100)
         print(tokenizer.decode([j for j in i['perfect'][0].tolist() if j>=0]))
         perfect_data=i['perfect']
         perfect_mask=i['perfect_mask']
         mask_data=perfect_data*(1-perfect_mask)+perfect_mask*-1
-        print('perfect_masked')
+        print('perfect_masked'+'-'*100)
         print(tokenizer.decode([j for j in mask_data[0].tolist() if j>=0]))
 
 
-        print('reject')
+        print('reject'+'-'*100)
         print(tokenizer.decode([j for j in i['reject'][0].tolist() if j>=0]))
         reject_data=i['reject']
         reject_mask=i['reject_mask']
         mask_data=reject_data*(1-reject_mask)+reject_mask*-1
-        print('reject_masked')
+        print('reject_masked'+'-'*100)
         print(tokenizer.decode([j for j in mask_data[0].tolist() if j>=0]))
 
 
@@ -398,8 +368,9 @@ def main():
 
         # print(input_list.shape)
         # print(target_list.shape)
-        if id>1:
+        if id>3:
             break
+        print('\n\n')
    
 if __name__=='__main__':
     # main()
